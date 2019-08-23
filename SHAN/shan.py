@@ -10,18 +10,24 @@ import logging.config
 
 
 class data_generation():
+    '''
+    Initialize data generator with paths to input files and setup variables
+    '''
     def __init__(self, type, neg_number):
         print('init')
         self.data_type = type
+
         self.train_dataset = './data/' + self.data_type + '/' + self.data_type + '_train_dataset.csv'
+        print('use train dataset ',self.train_dataset)
         self.test_dataset = './data/' + self.data_type + '/' + self.data_type + '_test_dataset.csv'
+        print('use test dataset ',self.test_dataset)
 
-
-        self.train_users = []
-        self.train_sessions = []  # 当前的session
-        self.train_items = []  # 随机采样得到的positive
-        self.train_neg_items = []  # 随机采样得到的negative
-        self.train_pre_sessions = []  # 之前的session集合
+        self.train_users = [] # each session in train_sessions has a corresponding 1 element in train_users
+        # indicating the users
+        self.train_sessions = []  # sessions with training items (removed prediction item)
+        self.train_items = []  # prediction items, one for each session
+        self.train_neg_items = []  # Randomly sampled negative items, for each user (and session)
+        self.train_pre_sessions = []  # Previous session collection
 
         self.test_users = []
         self.test_candidate_items = []
@@ -37,56 +43,88 @@ class data_generation():
         self.records_number = 0
 
     def gen_train_data(self):
+        '''
+        Read in training data file
+        split into sessions, and items per user.
+        For each user-specific session, create negative items, create random item to predict
+        :return:
+        '''
+
+        # read user and session columns whole dataset
         self.data = pd.read_csv(self.train_dataset, names=['user', 'sessions'], dtype='str')
+
         is_first_line = 1
         for line in self.data.values:
             if is_first_line:
+                # the first line in file needs to contain the number of users in user row, and number of items in
+                # sessions row
                 self.user_number = int(line[0])
                 self.item_number = int(line[1])
-                self.user_purchased_item = dict()  # 保存每个用户购买记录，可用于train时负采样和test时剔除已打分商品
+                self.user_purchased_item = dict()  # Save each user's purchase record, which can be used for negative
+                # sampling when train and rejected items for test
                 is_first_line = 0
             else:
                 user_id = int(line[0])
+                # get list of sessions with items
                 sessions = [i for i in line[1].split('@')]
                 size = len(sessions)
+                # do not consider users with less than 2 sessions
                 if size < 2:
                     continue
                 the_first_session = [int(i) for i in sessions[0].split(':')]
                 self.train_pre_sessions.append(the_first_session)
                 tmp = copy.deepcopy(the_first_session)
                 self.user_purchased_item[user_id] = tmp
+                # loop over all sessions after first session of user
                 for j in range(1, size):
-                    # 每个用户的每个session在train_users中都对应着其user_id，不一定是连续的
+                    # Each session of each user corresponds to its user_id in train_users, not necessarily continuous.
                     self.train_users.append(user_id)
                     # test = sessions[j].split(':')
                     current_session = [int(it) for it in sessions[j].split(':')]
+                    # create list of negative items which are those not interacted with by user
                     neg = self.gen_neg(user_id)
                     self.train_neg_items.append(neg)
-                    # 将当前session加入到用户购买的记录当中
-                    # 之所以放在这个位置，是因为在选择测试item时，需要将session中的一个item移除、
-                    # 如果放在后面操作，当前session中其实是少了一个用来做当前session进行预测的item
+                    # Add the current session to the record purchased by the user The reason for this is because when
+                    # you select the test item, you need to remove an item from the session. If you put it in the
+                    # back, the current session is actually one less item used to make the current session prediction.
                     if j != 1:
                         tmp = copy.deepcopy(self.user_purchased_item[user_id])
                         self.train_pre_sessions.append(tmp)
                     tmp = copy.deepcopy(current_session)
+                    # add items to list of items purchased by user
                     self.user_purchased_item[user_id].extend(tmp)
-                    # 随机挑选一个作为prediction item
+
+                    # Pick one randomly as a prediction item, remove that item from the training items
                     item = random.choice(current_session)
                     self.train_items.append(item)
                     current_session.remove(item)
+
+                    # collect sessions for training
                     self.train_sessions.append(current_session)
+
+                    # count the number of sessions
                     self.records_number += 1
 
     def gen_test_data(self):
+        '''
+
+        :return:
+        '''
+        # read test data
         self.data = pd.read_csv(self.test_dataset, names=['user', 'sessions'], dtype='str')
+
         self.test_candidate_items = list(range(self.item_number))
 
-        # 对于ndarray进行sample得到test目标数据
+        # Shuffle test data, by user
         sub_index = self.shuffle(len(self.data.values))
         data = self.data.values[sub_index]
 
+        #
         for line in data:
+            # first col is user id
             user_id = int(line[0])
+
+            # if user was present in training set??
             if user_id in self.user_purchased_item.keys():
                 current_session = [int(i) for i in line[1].split(':')]
                 if len(current_session) < 2:
@@ -110,6 +148,11 @@ class data_generation():
         return sub_index
 
     def gen_neg(self, user_id):
+        '''
+        Create list of (negative) items which are those not purchased by user
+        :param user_id: id of user
+        :return:
+        '''
         count = 0
         neg_item_set = list()
         while count < self.neg_number:
@@ -158,16 +201,21 @@ class shan():
         print('init ... ')
         self.input_data_type = data_type
 
+        # setup logging
         logging.config.fileConfig('logging.conf')
         self.logger = logging.getLogger()
         fh = logging.FileHandler('shan_log_' + data_type + '_d_' + str(global_dimension), mode='a', encoding=None,
                                  delay=False)
         self.logger.addHandler(fh)
 
+        # initialize data generator
         self.dg = data_generation(self.input_data_type, neg_number)
-        # 数据格式化
+
+        # Data formatting
+        print("reading training and testing data ....")
         self.dg.gen_train_data()
         self.dg.gen_test_data()
+        print('all training and testing data was read')
 
         self.train_user_purchased_item_dict = self.dg.user_purchased_item
 
@@ -367,11 +415,19 @@ class shan():
 
 
 if __name__ == '__main__':
+
+    # specify type of data set, types of data sets available
     type = ['tallM', 'gowalla', 'lastFM', 'fineFoods', 'movieLens', 'tafeng']
+    index = 5
+    print('use dataset ',type[index])
+    #
     neg_number = 10
     itera = 100
     global_dimension = 50
-    index = 5
+
+    #
     model = shan(type[index], neg_number, itera, global_dimension)
+
     model.build_model()
+
     model.run()
