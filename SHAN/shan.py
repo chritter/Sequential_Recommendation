@@ -52,6 +52,7 @@ class data_generation():
 
         # read user and session columns whole dataset
         self.data = pd.read_csv(self.train_dataset, names=['user', 'sessions'], dtype='str')
+        print('read-in size of training data ',self.data.shape)
 
         is_first_line = 1
         for line in self.data.values:
@@ -114,6 +115,7 @@ class data_generation():
         '''
         # read test data
         self.data = pd.read_csv(self.test_dataset, names=['user', 'sessions'], dtype='str')
+        print('read-in size of testing data ',self.data.shape)
 
         # test candidates are all (unique) items, based on total number of items item_number
         self.test_candidate_items = list(range(self.item_number))
@@ -145,6 +147,7 @@ class data_generation():
                 self.test_sessions.append(current_session)
                 self.test_pre_sessions.append(self.user_purchased_item[user_id])
 
+        print('identified number of users with sessions: ',len(self.test_users))
         # batch_user = self.test_users[user_id:user_id + batch_size]
         # batch_item = self.test_candidate_items
         # batch_session = self.test_sessions[user_id]
@@ -279,7 +282,7 @@ class shan():
 
         # size of item and user embeddings
         self.global_dimension = global_dimension
-        # batch size is 1! then get_test_data makes sense..
+        # batch size is 1! then get_test_data makes sense.., cannot be hyperparameter
         self.batch_size = 1
         self.results = []  # used to save the prediction results of each user of test, and finally calculate
         # precision
@@ -329,92 +332,142 @@ class shan():
 
     def attention_level_one(self, user_embedding, pre_sessions_embedding, the_first_w, the_first_bias):
         '''
-
-        :param user_embedding:
-        :param pre_sessions_embedding:
-        :param the_first_w:
-        :param the_first_bias:
+        First attention level which computes the long-term user representation u^long
+        :param user_embedding: u
+        :param pre_sessions_embedding: V_j
+        :param the_first_w: W_1 in MLP
+        :param the_first_bias: b_1 in MLP
         :return:
         '''
 
-        # 由于维度的原因，matmul和multiply方法要维度的变化
-        # 最终weight为 1*n 的矩阵
+        # Matmul and multiply methods require dimensional changes due to dimensions
+        # a matrix with a final weight of 1*n
+        # h_1_j = RELU(pre_sessions_embedding*the_first_w + the_first_bias) (eq 1 in paper)
+        # a_j = SOFTMAX((h_1_j * user_embedding^T)^T) (eq 2)
         self.weight = tf.nn.softmax(tf.transpose(tf.matmul(tf.nn.relu(
             tf.add(tf.matmul(pre_sessions_embedding, the_first_w), the_first_bias)), tf.transpose(user_embedding))))
 
+        # u^long = SUM(pre_sessions_embedding * weight^T) (eq 3 in paper)
         out = tf.reduce_sum(tf.multiply(pre_sessions_embedding, tf.transpose(self.weight)), axis=0)
+
         return out
 
     def attention_level_two(self, user_embedding, long_user_embedding, current_session_embedding, the_second_w,
                             the_second_bias):
-        # 需要将long_user_embedding加入到current_session_embedding中来进行attention，
-        # 论文中规定，long_user_embedding的表示也不会根据softmax计算得到的参数而变化。
+        '''
 
+        :param user_embedding:
+        :param long_user_embedding: long-term user embedding from attention_level_one
+        :param current_session_embedding: x_j
+        :param the_second_w:
+        :param the_second_bias:
+        :return:
+        '''
+        # Need to add long_user_embedding to current_session_embedding for attention, The paper states that the
+        # representation of long_user_embedding will not change according to the parameters calculated by softmax.
+
+        # first construct x_j based on current_session_embedding and long_user_embedding, why is concat order the
+        # opposite as in paper?
+        # then perform same steps as in attention_level_one (eq. 4,5)
         self.weight = tf.nn.softmax(tf.transpose(tf.matmul(
             tf.nn.relu(tf.add(
                 tf.matmul(tf.concat([current_session_embedding, tf.expand_dims(long_user_embedding, axis=0)], 0),
                           the_second_w),
                 the_second_bias)), tf.transpose(user_embedding))))
+
+        # hybrid user representation u^hybrid based on (eq. 6)
         out = tf.reduce_sum(
             tf.multiply(tf.concat([current_session_embedding, tf.expand_dims(long_user_embedding, axis=0)], 0),
                         tf.transpose(self.weight)), axis=0)
         return out
 
     def build_model(self):
+        '''
+        Combine network elements to build final model. Setup network propagation and final loss function for specific
+        session input.
+         Saves the items with the highest preference score :return:
+        '''
         print('building model ... ')
+
+        # look up embedding for user_id
         self.user_embedding = tf.nn.embedding_lookup(self.user_embedding_matrix, self.user_id)
+        # lookup embedding for item_id
         self.item_embedding = tf.nn.embedding_lookup(self.item_embedding_matrix, self.item_id)
+        # lookup other items
         self.current_session_embedding = tf.nn.embedding_lookup(self.item_embedding_matrix, self.current_session)
         self.pre_sessions_embedding = tf.nn.embedding_lookup(self.item_embedding_matrix, self.pre_sessions)
         self.neg_item_embedding = tf.nn.embedding_lookup(self.item_embedding_matrix, self.neg_item_id)
 
+        # long-term user embedding u^l
         self.long_user_embedding = self.attention_level_one(self.user_embedding, self.pre_sessions_embedding,
                                                             self.the_first_w, self.the_first_bias)
-
+        #  hybrid user representation u^hybrid
         self.hybrid_user_embedding = self.attention_level_two(self.user_embedding, self.long_user_embedding,
                                                               self.current_session_embedding,
                                                               self.the_second_w, self.the_second_bias)
 
-        # compute preference
+        # compute preference R = u_t * v_j (eq. 7)
         self.positive_element_wise = tf.matmul(tf.expand_dims(self.hybrid_user_embedding, axis=0),
                                                tf.transpose(self.item_embedding))
+        # compute preference R for negative items
         self.negative_element_wise = tf.matmul(tf.expand_dims(self.hybrid_user_embedding, axis=0),
                                                tf.transpose(self.neg_item_embedding))
+
+        # calculate loss through MAP (eq. 9)
         self.intention_loss = tf.reduce_mean(
             -tf.log(tf.nn.sigmoid(self.positive_element_wise - self.negative_element_wise)))
+        # regularization terms based on lambda * user and item embeddings and l2 norm
         self.regular_loss_u_v = tf.add(tf.add(self.lamada_u_v * tf.nn.l2_loss(self.user_embedding),
                                               self.lamada_u_v * tf.nn.l2_loss(self.item_embedding)),
                                        self.lamada_u_v * tf.nn.l2_loss(self.neg_item_embedding))
+        # regularization term bsaed on the MLP weights
         self.regular_loss_a = tf.add(self.lamada_a * tf.nn.l2_loss(self.the_first_w),
                                      self.lamada_a * tf.nn.l2_loss(self.the_second_w))
+        # sum regularization terms
         self.regular_loss = tf.add(self.regular_loss_a, self.regular_loss_u_v)
+
+        # final loss function
         self.intention_loss = tf.add(self.intention_loss, self.regular_loss)
 
-        # 增加test操作，由于每个用户pre_sessions和current_session的长度不一样，
-        # 所以无法使用同一个矩阵进行表示同时计算，因此每个user计算一次，将结果保留并进行统计
-        # 注意，test集合的整个item_embeeding得到的是 [M*K]的矩阵，M为所有item的个数，K为维度
+        # Increase the test operation. Since the length of each user's pre_sessions and current_session is different,
+        # you cannot use the same matrix to represent the simultaneous calculation. Therefore, each user is
+        # calculated once, the result is retained and statistical attention is paid. The entire item_embeeding of the
+        # test set is obtained. [M*K] matrix, M is the number of all items, K is the dimension
+
+        # Finds values of preference R and indices of the k largest entries for the last dimension.
         self.top_value_10, self.top_index_10 = tf.nn.top_k(self.positive_element_wise, k=10, sorted=True)
         self.top_value_20, self.top_index_20 = tf.nn.top_k(self.positive_element_wise, k=20, sorted=True)
         self.top_value_50, self.top_index_50 = tf.nn.top_k(self.positive_element_wise, k=50, sorted=True)
 
     def run(self):
+        '''
+        Do the computation
+        :return:
+        '''
         print('running ... ')
         with tf.Session() as self.sess:
+
+            # use gradient descent to minimize loss (no global_step applied)
             self.intention_optimizer = tf.train.GradientDescentOptimizer(learning_rate=0.1).minimize(
                 self.intention_loss)
+
             init = tf.global_variables_initializer()
             self.sess.run(init)
 
             for iter in range(self.iteration):
-                print('new iteration begin ... ')
-                self.logger.info('iteration: '+str(iter))
+                print('start iteration/epoch ',iter)
+                self.logger.info('iteration/epoch: '+str(iter))
 
                 all_loss = 0
-                while self.step * self.batch_size < self.dg.records_number:
-                    # 按批次读取数据
-                    batch_user, batch_item, batch_session, batch_neg_item, batch_pre_sessions = self.dg.gen_train_batch_data(
-                        self.batch_size)
 
+                # go through all sessions in training set
+                while self.step * self.batch_size < self.dg.records_number:
+
+                    # Read train data by batch/1 session
+                    batch_user, batch_item, batch_session, batch_neg_item, batch_pre_sessions = \
+                        self.dg.gen_train_batch_data(self.batch_size)
+
+                    # one step with 1 session
                     _, loss = self.sess.run([self.intention_optimizer, self.intention_loss],
                                             feed_dict={self.user_id: batch_user,
                                                        self.item_id: batch_item,
@@ -422,50 +475,79 @@ class shan():
                                                        self.neg_item_id: batch_neg_item,
                                                        self.pre_sessions: batch_pre_sessions
                                                        })
+                    # accumulate final loss
                     all_loss += loss
                     self.step += 1
                     # if self.step * self.batch_size % 5000 == 0:
-                self.logger.info('loss = '+str(all_loss)+'\n')
+                self.logger.info('loss after iteration/epoch = '+str(all_loss)+'\n')
                 self.logger.info('eval ...')
-                self.evolution()
+
+                # evaluate performance on test set, calculatione Recall@k and MRR@k
+                self.test_set_evaluation()
+
                 print(self.step, '/', self.dg.train_batch_id, '/', self.dg.records_number)
                 self.step = 0
 
     def P_k(self, pre_top_k, true_items):
+        '''
+        Calculat recall@k
+        :param pre_top_k:
+        :param true_items: true items (from labels)
+        :return:
+        '''
         right_pre = 0
         user_number = len(pre_top_k)
+        # loop over session predictions
         for i in range(user_number):
             if true_items[i] in pre_top_k[i][0]:
                 right_pre += 1
         return right_pre / user_number
 
     def MRR_k(self, pre_top_k, true_items):
+        '''
+        Mean reciprocal rank MRR@k
+        :param pre_top_k:
+        :param true_items:
+        :return:
+        '''
         MRR_rate = 0
         user_number = len(pre_top_k)
         for i in range(user_number):
             if true_items[i] in pre_top_k[i][0]:
+                # get rank
                 index = pre_top_k[i].tolist()[0].index(true_items[i])
                 MRR_rate += 1 / (index + 1)
         return MRR_rate / user_number
 
-    def evolution(self):
+    def test_set_evaluation(self):
+        '''
+
+        :return:
+        '''
         pre_top_k_10 = []
         pre_top_k_20 = []
         pre_top_k_50 = []
 
+        # iterate over users in test set
         for _ in self.test_users:
+            # get test data session
             batch_user, batch_item, batch_session, batch_pre_session = self.dg.gen_test_batch_data(
                 self.batch_size)
+
+            # calculate preference for lists of top 10, 20, 50 items
             top_index_10, top_index_20, top_index_50 = self.sess.run(
                 [self.top_index_10, self.top_index_20, self.top_index_50],
                 feed_dict={self.user_id: batch_user,
                            self.item_id: batch_item,
                            self.current_session: batch_session,
                            self.pre_sessions: batch_pre_session})
+
+            # append results
             pre_top_k_10.append(top_index_10)
             pre_top_k_20.append(top_index_20)
             pre_top_k_50.append(top_index_50)
 
+        # evaluate
         P_10 = self.P_k(pre_top_k_10, self.test_real_items)
         MRR_10 = self.MRR_k(pre_top_k_10, self.test_real_items)
 
@@ -475,13 +557,13 @@ class shan():
         P_50 = self.P_k(pre_top_k_50, self.test_real_items)
         MRR_50 = self.MRR_k(pre_top_k_50, self.test_real_items)
 
-        self.logger.info(self.input_data_type + ',' + 'P@10' + ' = ' + str(P_10))
+        self.logger.info(self.input_data_type + ',' + 'Recall@10' + ' = ' + str(P_10))
         self.logger.info(self.input_data_type + ',' + 'MRR@10' + ' = ' + str(MRR_10) + '\n')
 
-        self.logger.info(self.input_data_type + ',' + 'P@20' + ' = ' + str(P_20))
+        self.logger.info(self.input_data_type + ',' + 'Recall@20' + ' = ' + str(P_20))
         self.logger.info(self.input_data_type + ',' + 'MRR@20' + ' = ' + str(MRR_20) + '\n')
 
-        self.logger.info(self.input_data_type + ',' + 'P@50' + ' = ' + str(P_50))
+        self.logger.info(self.input_data_type + ',' + 'Recall@50' + ' = ' + str(P_50))
         self.logger.info(self.input_data_type + ',' + 'MRR@50' + ' = ' + str(MRR_50) + '\n')
 
         return
@@ -494,17 +576,19 @@ if __name__ == '__main__':
     index = 0
     print('use dataset ',type[index])
 
-    # parameters
+    # hyperparameters
     # number of negative items for training, per session
     neg_number = 10
-    #
+    # number of epochs
     itera = 100
     # size of item and user embeddings
     global_dimension = 50
 
-    #
+    # init model
     model = shan(type[index], neg_number, itera, global_dimension)
 
+    # build model
     model.build_model()
 
+    # start training and evaluation
     model.run()
