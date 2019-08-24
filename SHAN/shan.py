@@ -24,10 +24,10 @@ class data_generation():
 
         self.train_users = [] # each session in train_sessions has a corresponding 1 element in train_users
         # indicating the users
-        self.train_sessions = []  # sessions with training items (removed prediction item)
+        self.train_sessions = []  # sessions with training items (removed prediction item), list with session lists
         self.train_items = []  # prediction items, one for each session
         self.train_neg_items = []  # Randomly sampled negative items, for each user (and session)
-        self.train_pre_sessions = []  # Previous session collection
+        self.train_pre_sessions = []  # Previous session collection, long-term item set L
 
         self.test_users = []
         self.test_candidate_items = []
@@ -57,9 +57,8 @@ class data_generation():
         for line in self.data.values:
             if is_first_line:
                 # the first line in file needs to contain the number of users in user row, and number of items in
-                # sessions row
-                self.user_number = int(line[0])
-                self.item_number = int(line[1])
+                self.user_number = int(line[0]) # total number of users
+                self.item_number = int(line[1]) # total number of items
                 self.user_purchased_item = dict()  # Save each user's purchase record, which can be used for negative
                 # sampling when train and rejected items for test
                 is_first_line = 0
@@ -77,7 +76,7 @@ class data_generation():
                 self.user_purchased_item[user_id] = tmp
                 # loop over all sessions after first session of user
                 for j in range(1, size):
-                    # Each session of each user corresponds to its user_id in train_users, not necessarily continuous.
+                    # save user for session j, we loop over sessions of user, so why is this inside j loop?
                     self.train_users.append(user_id)
                     # test = sessions[j].split(':')
                     current_session = [int(it) for it in sessions[j].split(':')]
@@ -88,10 +87,13 @@ class data_generation():
                     # you select the test item, you need to remove an item from the session. If you put it in the
                     # back, the current session is actually one less item used to make the current session prediction.
                     if j != 1:
+                        # save list of previously purchased items for user
                         tmp = copy.deepcopy(self.user_purchased_item[user_id])
+                        # this is the long-term item set L
                         self.train_pre_sessions.append(tmp)
                     tmp = copy.deepcopy(current_session)
-                    # add items to list of items purchased by user
+                    # add items to list of items purchased by user, dictionary to lookup all items of user based on
+                    # user name key
                     self.user_purchased_item[user_id].extend(tmp)
 
                     # Pick one randomly as a prediction item, remove that item from the training items
@@ -113,6 +115,7 @@ class data_generation():
         # read test data
         self.data = pd.read_csv(self.test_dataset, names=['user', 'sessions'], dtype='str')
 
+        # test candidates are all (unique) items, based on total number of items item_number
         self.test_candidate_items = list(range(self.item_number))
 
         # Shuffle test data, by user
@@ -121,18 +124,24 @@ class data_generation():
 
         #
         for line in data:
+
             # first col is user id
             user_id = int(line[0])
 
-            # if user was present in training set??
+            # consider only user if user was present in training set
             if user_id in self.user_purchased_item.keys():
                 current_session = [int(i) for i in line[1].split(':')]
+                # skip all users with less than 2 sessions
                 if len(current_session) < 2:
                     continue
                 self.test_users.append(user_id)
+
+                # Pick one randomly as a prediction item, remove that item from the input items
                 item = random.choice(current_session)
                 self.test_real_items.append(int(item))
                 current_session.remove(item)
+
+                # input sessions/items
                 self.test_sessions.append(current_session)
                 self.test_pre_sessions.append(self.user_purchased_item[user_id])
 
@@ -163,33 +172,56 @@ class data_generation():
         return neg_item_set
 
     def gen_train_batch_data(self, batch_size):
+        '''
+        Get training data for session self.train_batch_id, including items to predict, negative list and previous items
+        Get batch_size items to predict
+        :param batch_size:
+        :return:
+        '''
         # l = len(self.train_users)
 
         if self.train_batch_id == self.records_number:
             self.train_batch_id = 0
 
+        # even though multiple users, this is just one user, see comment for train_users
         batch_user = self.train_users[self.train_batch_id:self.train_batch_id + batch_size]
+        # get items to predict, these items were extracted from multiple sessions
         batch_item = self.train_items[self.train_batch_id:self.train_batch_id + batch_size]
+        # short-term item set S, just one session
         batch_session = self.train_sessions[self.train_batch_id]
+
         # batch_neg_item = self.train_neg_items[self.train_batch_id:self.train_batch_id + batch_size]
+
+        # get negative item for session batch_session
         batch_neg_item = self.train_neg_items[self.train_batch_id]
+        # get long-term item set L
         batch_pre_session = self.train_pre_sessions[self.train_batch_id]
 
+        # increment train_batch_id to ...
         self.train_batch_id = self.train_batch_id + batch_size
 
         return batch_user, batch_item, batch_session, batch_neg_item, batch_pre_session
 
     def gen_test_batch_data(self, batch_size):
+        '''
+        Get test data for session self.test_batch_id
+        :param batch_size:
+        :return:
+        '''
+
         l = len(self.test_users)
 
         if self.test_batch_id == l:
             self.test_batch_id = 0
 
         batch_user = self.test_users[self.test_batch_id:self.test_batch_id + batch_size]
+        # batch_item is list of all items
         batch_item = self.test_candidate_items
+
         batch_session = self.test_sessions[self.test_batch_id]
         batch_pre_session = self.test_pre_sessions[self.test_batch_id]
 
+        # increment test_batch_id
         self.test_batch_id = self.test_batch_id + batch_size
 
         return batch_user, batch_item, batch_session, batch_pre_session
@@ -198,17 +230,28 @@ class data_generation():
 class shan():
     # data_type :  TallM / GWL
     def __init__(self, data_type, neg_number, itera, global_dimension):
+        '''
+
+        :param data_type:
+        :param neg_number: number of negative items used in prediction for each session
+        :param itera:
+        :param global_dimension: size of item and user embeddings
+        '''
+
         print('init ... ')
         self.input_data_type = data_type
 
         # setup logging
+        # Reads the logging configuration from file logging.conf
         logging.config.fileConfig('logging.conf')
         self.logger = logging.getLogger()
+        # sends logging output to file
+        print('send logging info to ','shan_log_' + data_type + '_d_' + str(global_dimension))
         fh = logging.FileHandler('shan_log_' + data_type + '_d_' + str(global_dimension), mode='a', encoding=None,
                                  delay=False)
         self.logger.addHandler(fh)
 
-        # initialize data generator
+        # initialize data generator, with
         self.dg = data_generation(self.input_data_type, neg_number)
 
         # Data formatting
@@ -217,52 +260,82 @@ class shan():
         self.dg.gen_test_data()
         print('all training and testing data was read')
 
+        # dictionary to lookup all items purchased by user
         self.train_user_purchased_item_dict = self.dg.user_purchased_item
 
+        # total number of users
         self.user_number = self.dg.user_number
+        # total number of items
         self.item_number = self.dg.item_number
+        # number of negative items
         self.neg_number = self.dg.neg_number
 
+        # test data parameters
         self.test_users = self.dg.test_users
         self.test_candidate_items = self.dg.test_candidate_items
         self.test_sessions = self.dg.test_sessions
         self.test_pre_sessions = self.dg.test_pre_sessions
         self.test_real_items = self.dg.test_real_items
 
+        # size of item and user embeddings
         self.global_dimension = global_dimension
+        # batch size is 1! then get_test_data makes sense..
         self.batch_size = 1
-        self.results = []  # 可用来保存test每个用户的预测结果，最终计算precision
+        self.results = []  # used to save the prediction results of each user of test, and finally calculate
+        # precision
 
         self.step = 0
         self.iteration = itera
+        # regularization parameter for user and item embedding parameters (see paper)
         self.lamada_u_v = 0.01
+        # regularization parameter for weights of attention network
         self.lamada_a = 0.01
 
+        # set normal distribution and parameters, as described in Algorithm 1 in paper
         self.initializer = tf.random_normal_initializer(mean=0, stddev=0.01)
+        # set uniform distribution and parameters, as described  in Algorithm 1 in paper
         self.initializer_param = tf.random_uniform_initializer(minval=-np.sqrt(3 / self.global_dimension),
                                                                maxval=np.sqrt(3 / self.global_dimension))
 
+        # user id and item id for training input
         self.user_id = tf.placeholder(tf.int32, shape=[None], name='user_id')
         self.item_id = tf.placeholder(tf.int32, shape=[None], name='item_id')
-        # 不管是当前的session，还是之前的session集合，在数据处理阶段都是一个数组，数组内容为item的编号
+
+        # further training input
+        # Whether it is the current session or the previous session collection, it is an array in the data processing
+        # stage, and the array content is the item number.
         self.current_session = tf.placeholder(tf.int32, shape=[None], name='current_session')
         self.pre_sessions = tf.placeholder(tf.int32, shape=[None], name='pre_sessions')
         self.neg_item_id = tf.placeholder(tf.int32, shape=[None], name='neg_item_id')
 
+        # user embedding U
         self.user_embedding_matrix = tf.get_variable('user_embedding_matrix', initializer=self.initializer,
                                                      shape=[self.user_number, self.global_dimension])
+        # item embedding V
         self.item_embedding_matrix = tf.get_variable('item_embedding_matrix', initializer=self.initializer,
                                                      shape=[self.item_number, self.global_dimension])
+        # W_1 in MLP 1 of attention network 1 (paper)
         self.the_first_w = tf.get_variable('the_first_w', initializer=self.initializer_param,
                                            shape=[self.global_dimension, self.global_dimension])
+        # W_2 in MLP 2
         self.the_second_w = tf.get_variable('the_second_w', initializer=self.initializer_param,
                                             shape=[self.global_dimension, self.global_dimension])
+        # b_1 bias of MLP 1
         self.the_first_bias = tf.get_variable('the_first_bias', initializer=self.initializer_param,
                                               shape=[self.global_dimension])
+        # b_2 bias of MLP 2
         self.the_second_bias = tf.get_variable('the_second_bias', initializer=self.initializer_param,
                                                shape=[self.global_dimension])
 
     def attention_level_one(self, user_embedding, pre_sessions_embedding, the_first_w, the_first_bias):
+        '''
+
+        :param user_embedding:
+        :param pre_sessions_embedding:
+        :param the_first_w:
+        :param the_first_bias:
+        :return:
+        '''
 
         # 由于维度的原因，matmul和multiply方法要维度的变化
         # 最终weight为 1*n 的矩阵
@@ -418,11 +491,15 @@ if __name__ == '__main__':
 
     # specify type of data set, types of data sets available
     type = ['tallM', 'gowalla', 'lastFM', 'fineFoods', 'movieLens', 'tafeng']
-    index = 5
+    index = 0
     print('use dataset ',type[index])
-    #
+
+    # parameters
+    # number of negative items for training, per session
     neg_number = 10
+    #
     itera = 100
+    # size of item and user embeddings
     global_dimension = 50
 
     #
