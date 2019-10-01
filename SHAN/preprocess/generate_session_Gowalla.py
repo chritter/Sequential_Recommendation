@@ -1,7 +1,7 @@
 import pandas as pd
 import numpy as np
 import os
-
+import datetime
 
 # used to generate datatype_dataset.csv file
 # sessions
@@ -10,6 +10,8 @@ class generate(object):
 
     def __init__(self, dataPath, sessPath):
         self._data = pd.read_csv(dataPath,sep='\t')
+        self._data['Time'] = self._data['Time'].apply(lambda x: datetime.datetime.fromtimestamp(x).strftime("%Y%m%d"))
+
         print(self._data.head())
         self.sessPath = sessPath
 
@@ -82,7 +84,7 @@ class generate(object):
         session_train_path = self.sessPath + '_train_dataset.csv'
         print('write train data of shape ',self._train_data.shape,' into ',session_train_path)
         session_test_path = self.sessPath + '_test_dataset.csv'
-        print('write test data of shape ',self.session_test_path.shape,' into ',session_test_path)
+        print('write test data of shape ',session_test_path.shape,' into ',session_test_path)
 
         if os.path.exists(session_train_path):
             os.remove(session_train_path)
@@ -149,7 +151,8 @@ if __name__ == '__main__':
     datatype = ['tallM', 'gowalla']
 
     #dataPath = '../data/' + datatype[1] + '_data.csv'
-    dataPath = '/Users/christian/StatCan/Projects/RecommendationSystems/RecomSystemLibrary/RecommenderSystems/sequentialRec/data/gowalla/gowalla_train_tr.txt'
+    #dataPath = '/Users/christian/StatCan/Projects/RecommendationSystems/RecomSystemLibrary/RecommenderSystems/sequentialRec/data/gowalla/gowalla_train_tr.txt'
+    dataPath = '../data/gowalla/gowalla_train_tr.txt'
     sessPath = '../data/' + datatype[1]
 
     # read in file, into object
